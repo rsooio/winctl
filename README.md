@@ -1,0 +1,93 @@
+# winctl
+
+Command-line automation for Windows applications: locate windows and UI elements, inspect them, click, and type.
+
+Standalone C project: a single `winctl.exe`, no runtime dependencies.
+
+## Build
+
+Requires a MinGW-w64 cross compiler:
+
+```sh
+make
+```
+
+Produces `winctl.exe`. Distribute the binary with this document (and LICENSE).
+
+## Usage
+
+```
+winctl <command> [arguments...]
+winctl --help
+```
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `list [--all]` | Element query (set semantics). No locator = top-level windows (default `/Window`, fast). Full tree via `//*`. Locator starting with `/` = global query (virtual root). `hwnd` prefix = single window; no xpath = whole tree. Large-tree processes (firefox.exe etc.) excluded by default; `--all` includes them |
+| `prop <locator> [key] [value]` | Read/write properties: no value reads, value writes; no key dumps all (key: value lines) |
+| `click <locator> [--mouse] [--button B] [--action A]` | Click element (first match) |
+| `focus <locator>` | Set focus (first match) |
+
+`prop`/`click`/`focus` locate the first match; `list` is the only set-semantics command.
+
+## Locator
+
+```
+<hwnd>             Root element (hex, 0x prefix optional); any window/element handle,
+                  the hwnd column of list output can be used as a root
+<hwnd>/<xpath>     Locate elements below it; xpath is relative to the root;
+                  the first step must match the root element type; use the full
+                  path (with root type step) or an element hwnd for deep targets
+/<xpath>          list global query: xpath evaluated from the virtual root
+                  (all top-level windows); /Window matches top-level windows,
+                  //Window matches any depth
+```
+
+XPath syntax: `/` `//` `*` `[n]` positional predicate (in-tree), `[@Name='']` `[@Type='']` `[@Id='']` `[@Class='']` `[@Pid='']` attribute predicates (`@` optional; `@Pid` only on the top-level window step), `*=` contains `^=` prefix `$=` suffix, `and`, `!=`. Predicate values may be quoted or bare.
+
+## Properties
+
+| key | Access | Description |
+|---|---|---|
+| `value` | read/write | ValuePattern read/write; falls back to focus + clipboard input |
+| `state` | read/write | Window state, `normal`/`maximized`/`minimized` |
+| `pid` | read-only | Process ID of the element's window handle (decimal) |
+
+## Examples
+
+```sh
+winctl list                                  # top-level windows (default /Window, fast)
+winctl list //*                             # full tree of all visible windows
+winctl list /Window[@Name*='Notepad']       # top-level windows by title (fast)
+winctl list /Window[@Pid='1234']            # windows by process (dialog use case)
+winctl list /Window[@Name*='Notepad']/Pane//Button    # query inside a window
+winctl list 0x1a2b                          # single-window full tree
+winctl list "0x1a2b//*[@Name^='Open']"      # filter by name prefix
+winctl prop 0x1a2b value                    # read value
+winctl prop 0x1a2b value text               # write value
+winctl prop 0x1a2b state maximized          # maximize window
+winctl prop 0x1a2b pid                      # read process ID
+winctl click 0x1a2b/Window/Pane/Button      # click
+```
+
+Top-level window positioning supports attribute predicates only (`[@Name]`/`[@Pid]`/`[@Class]`); positional `[n]` on top-level windows is rejected (Z-order unstable). In-tree `[n]` is sibling order and stable.
+
+## Output and Exit Codes
+
+- Default: human-readable — `list` aligned columns (element rows `hwnd xpath name`; name truncated with ellipsis on narrow terminals, xpath always complete), `prop` key: value lines. `--json` outputs full JSON (element fields `hwnd/enabled/invokable/scrollable/name/value/rect/type/xpath`).
+- hwnd is hex throughout (`0x` prefix); pid is decimal.
+- Errors go to stderr with non-zero exit codes: 0 success (including empty query results), 1 invalid argument/locator, 2 invalid window handle, 3 element not found, 4 operation failed.
+
+### One Process, One Operation
+
+Each invocation is an independent, stateless process: locate, operate, exit. Serial use is naturally safe; retries/polling are implemented by the calling script (e.g. loop `winctl list /Window[@Pid='...']` to wait for a dialog).
+
+## Contract
+
+The CLI contract is defined by `winctl --help` output; keep this document in sync when changing command syntax.
+
+## License
+
+GNU General Public License v3.0. See LICENSE.
