@@ -47,6 +47,8 @@ winctl --help
 
 XPath syntax: `/` `//` `*` `[n]` positional predicate (in-tree), `[@Name='']` `[@Type='']` `[@Id='']` `[@Class='']` `[@Pid='']` attribute predicates (`@` optional; `@Pid` only on the top-level window step), `*=` contains `^=` prefix `$=` suffix, `and`, `!=`. Predicate values may be quoted or bare.
 
+Sub-path predicates (existence check, top-level window step only, e.g. `list /Window[Pid=123][//Text[@Name='x']]`): `[//X]` any depth, `[X]` any depth (prefix omitted), `[/X]` direct child, `[./X]` direct child, `[.//X]` any depth. Sub-path may nest and reuse all predicate syntax. Not supported inside tree (`list <hwnd>/...`) or locate (`prop`/`click`/`focus`).
+
 ## Properties
 
 | key | Access | Description |

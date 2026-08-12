@@ -75,7 +75,15 @@ static int name_type(const char *name) {
 enum { XP_ATTR_NAME, XP_ATTR_TYPE, XP_ATTR_ID, XP_ATTR_CLASS, XP_ATTR_PID };
 enum { XP_OP_EQ, XP_OP_NE, XP_OP_CONTAINS, XP_OP_PREFIX, XP_OP_SUFFIX };
 
-typedef struct { int attr; int op; char val[256]; } XPred;
+typedef struct XPath XPath;
+
+typedef struct {
+    int attr;
+    int op;
+    char val[256];
+    int is_path;        /* 1 = 子路径谓词（存在性，sub 有效） */
+    XPath *sub;         /* 子路径谓词 */
+} XPred;
 
 typedef struct {
     char name[32];      /* 类型名或 "*" */
@@ -85,12 +93,16 @@ typedef struct {
     int descendant;     /* 本段前为 // */
 } XStep;
 
-typedef struct { XStep steps[32]; int n; } XPath;
+struct XPath { XStep steps[32]; int n; };
 
 static int type_name_ct(IUIAutomationElement *el, const char *name);
-static int el_matches(IUIAutomationElement *el, const XStep *st);
+static int el_matches(IUIAutomationTreeWalker *walker, IUIAutomationElement *el,
+                     const XStep *st);
 static IUIAutomationElement *step_walk(Uia *u, IUIAutomationElement *from,
                                        const XStep *st);
+
+static int has_subpath(IUIAutomationTreeWalker *walker, IUIAutomationElement *root,
+                      const XPath *sub);
 
 static int attr_id(const char *s) {
     if (_stricmp(s, "name") == 0) return XP_ATTR_NAME;
@@ -99,6 +111,52 @@ static int attr_id(const char *s) {
     if (_stricmp(s, "class") == 0) return XP_ATTR_CLASS;
     if (_stricmp(s, "pid") == 0) return XP_ATTR_PID;
     return -1;
+}
+
+static int parse_xpath(const char *expr, XPath *xp, char *err, size_t errlen);
+
+/* 解析子路径谓词内容（[ 内、前缀已剥除）：扫描配对的 ]，递归 parse_xpath。
+ * desc 覆盖子路径首段的 descendant（./=0、无前缀=1 等）。成功后 *pp 指向 ] 之后 */
+static int parse_subpath(const char **pp, XPred *pr, int desc, char *err, size_t errlen) {
+    const char *s = *pp;
+    int depth = 0;
+    while (*s) {
+        if (*s == '[')
+            depth++;
+        else if (*s == ']') {
+            if (depth == 0)
+                break;
+            depth--;
+        }
+        s++;
+    }
+    if (*s != ']') {
+        snprintf(err, errlen, "子路径谓词缺少 ]");
+        return 0;
+    }
+    size_t len = (size_t)(s - *pp);
+    if (len >= 512) {
+        snprintf(err, errlen, "子路径过长");
+        return 0;
+    }
+    char buf[512];
+    memcpy(buf, *pp, len);
+    buf[len] = '\0';
+    XPath *sub = malloc(sizeof(XPath));
+    if (!sub) {
+        snprintf(err, errlen, "内存不足");
+        return 0;
+    }
+    if (!parse_xpath(buf, sub, err, errlen)) {
+        free(sub);
+        return 0;
+    }
+    if (sub->n > 0)
+        sub->steps[0].descendant = desc;
+    pr->sub = sub;
+    pr->is_path = 1;
+    *pp = s; /* 停在配对的 ] 处，由调用方统一消费 */
+    return 1;
 }
 
 static int parse_xpath(const char *expr, XPath *xp, char *err, size_t errlen) {
@@ -144,8 +202,44 @@ static int parse_xpath(const char *expr, XPath *xp, char *err, size_t errlen) {
                 int v = 0;
                 while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
                 st->pos = v;
+            } else if (*p == '/' || (*p == '.' && p[1] == '/')) {
+                /* 子路径谓词：[/X] 严格子级，[//X] 任意深度，[./X] 严格子级，[.//X] 任意深度 */
+                if (st->npreds >= 4) { snprintf(err, errlen, "谓词过多"); return 0; }
+                XPred *pr = &st->preds[st->npreds];
+                memset(pr, 0, sizeof *pr);
+                int desc;
+                const char *sp = p;
+                if (p[0] == '/' && p[1] == '/') { desc = 1; sp = p + 2; }
+                else if (p[0] == '/') { desc = 0; sp = p + 1; }
+                else if (p[1] == '/' && p[2] == '/') { desc = 1; sp = p + 3; } /* .// */
+                else { desc = 0; sp = p + 2; } /* ./ */
+                if (!parse_subpath(&sp, pr, desc, err, errlen))
+                    return 0;
+                st->npreds++;
+                p = sp;
             } else if (*p == '@' || isalpha((unsigned char)*p)) {
+                int is_subpath = 0;
+                /* 无前缀子路径：名字后跟 [ 或 /（如 [Text[@Name='x']]）→ 子路径，任意深度 */
+                if (*p != '@') {
+                    const char *q = p;
+                    while (isalnum((unsigned char)*q) || *q == '_' || *q == '-')
+                        q++;
+                    while (*q == ' ')
+                        q++;
+                    if (*q == '[' || *q == '/') {
+                        if (st->npreds >= 4) { snprintf(err, errlen, "谓词过多"); return 0; }
+                        XPred *pr = &st->preds[st->npreds];
+                        memset(pr, 0, sizeof *pr);
+                        if (!parse_subpath(&p, pr, 1, err, errlen))
+                            return 0;
+                        st->npreds++;
+                        is_subpath = 1;
+                    }
+                }
                 /* 属性谓词；@ 可选（XPath 兼容，子集内无歧义）；支持 and 连接多个（同一 [ ] 内） */
+                if (is_subpath)
+                    ; /* 子路径已消费，[] 由公共代码统一收尾 */
+                else
                 for (;;) {
                     if (st->npreds >= 4) { snprintf(err, errlen, "谓词过多"); return 0; }
                     XPred *pr = &st->preds[st->npreds];
@@ -260,6 +354,8 @@ static int el_matches_cached(IUIAutomationElement *el, const XStep *st) {
     }
     for (int i = 0; i < st->npreds; i++) {
         const XPred *pr = &st->preds[i];
+        if (pr->is_path)
+            continue; /* 子路径已由 seg_matches（顶层窗口段）验证 */
         if (pr->attr == XP_ATTR_PID)
             continue; /* @Pid 已由 seg_matches（顶层窗口段）验证，这里跳过避免二次求值失败 */
         if (pr->attr == XP_ATTR_TYPE) {
@@ -291,7 +387,8 @@ static int el_matches_cached(IUIAutomationElement *el, const XStep *st) {
 }
 
 /* 单步匹配（实时属性，定位族用；不含位置谓词，位置由调用方按兄弟序处理） */
-static int el_matches(IUIAutomationElement *el, const XStep *st) {
+static int el_matches(IUIAutomationTreeWalker *walker, IUIAutomationElement *el,
+                     const XStep *st) {
     if (st->name[0] && strcmp(st->name, "*") != 0) {
         CONTROLTYPEID ct = 0;
         el->lpVtbl->get_CurrentControlType(el, &ct);
@@ -300,6 +397,14 @@ static int el_matches(IUIAutomationElement *el, const XStep *st) {
     }
     for (int i = 0; i < st->npreds; i++) {
         const XPred *pr = &st->preds[i];
+        if (pr->is_path) {
+            /* 子路径谓词：walker 可用（子路径求值链）时递归检查，否则不支持 */
+            if (!walker)
+                return 0;
+            if (!has_subpath(walker, el, pr->sub))
+                return 0;
+            continue;
+        }
         if (pr->attr == XP_ATTR_PID)
             return 0; /* @Pid 仅 list 全局模式（顶层窗口段）支持 */
         if (pr->attr == XP_ATTR_TYPE) {
@@ -385,7 +490,7 @@ static IUIAutomationElement *step_find(Uia *u, IUIAutomationElement *from,
         arr->lpVtbl->GetElement(arr, i, &el);
         if (!el)
             continue;
-        if (el_matches(el, st)) {
+        if (el_matches(NULL, el, st)) {
             count++;
             if (st->pos == 0 || count == st->pos)
                 found = el; /* 引用来自 GetElement，保留 */
@@ -407,7 +512,7 @@ static IUIAutomationElement *step_walk(Uia *u, IUIAutomationElement *from,
     IUIAutomationElement *child = NULL;
     walker->lpVtbl->GetFirstChildElement(walker, from, &child);
     while (child) {
-        if (el_matches(child, st)) {
+        if (el_matches(NULL, child, st)) {
             n++;
             if (st->pos == 0 || n == st->pos)
                 return child; /* 引用来自 GetFirstChildElement，调用方负责 Release */
@@ -535,11 +640,70 @@ typedef struct {
     unsigned long long hwnd;
 } Seg;
 
-static int seg_matches(const Seg *seg, const XStep *st) {
+/* 子路径谓词求值：from 子树中查找匹配 st 的元素（手动 ControlView 遍历，
+ * 与树生成同视图同顺序）。subtree=1 时任意深度（文档序），pos 按每父计数 */
+static IUIAutomationElement *sub_has_match(IUIAutomationTreeWalker *walker,
+                                           IUIAutomationElement *from,
+                                           const XStep *st, int subtree) {
+    int n = 0;
+    IUIAutomationElement *child = NULL;
+    walker->lpVtbl->GetFirstChildElement(walker, from, &child);
+    while (child) {
+        if (el_matches(walker, child, st)) {
+            n++;
+            if (st->pos == 0 || n == st->pos)
+                return child; /* 引用来自 GetFirstChildElement，调用方 Release */
+        }
+        if (subtree) {
+            IUIAutomationElement *hit = sub_has_match(walker, child, st, 1);
+            if (hit) {
+                child->lpVtbl->Release(child);
+                return hit;
+            }
+        }
+        IUIAutomationElement *next = NULL;
+        walker->lpVtbl->GetNextSiblingElement(walker, child, &next);
+        child->lpVtbl->Release(child);
+        child = next;
+    }
+    return NULL;
+}
+
+/* 存在性检查：root 子树中存在匹配子路径 sub 的元素 */
+static int has_subpath(IUIAutomationTreeWalker *walker, IUIAutomationElement *root,
+                       const XPath *sub) {
+    if (!sub || sub->n == 0)
+        return 0;
+    IUIAutomationElement *cur = root;
+    cur->lpVtbl->AddRef(cur);
+    for (int i = 0; i < sub->n; i++) {
+        const XStep *st = &sub->steps[i];
+        IUIAutomationElement *next = sub_has_match(walker, cur, st, st->descendant);
+        if (!next) {
+            cur->lpVtbl->Release(cur);
+            return 0;
+        }
+        if (i > 0 || cur != root)
+            cur->lpVtbl->Release(cur);
+        cur = next;
+    }
+    cur->lpVtbl->Release(cur);
+    return 1;
+}
+
+static int seg_matches(IUIAutomationTreeWalker *walker, const Seg *seg, const XStep *st) {
     if (st->pos && seg->cnt != st->pos)
         return 0;
     for (int i = 0; i < st->npreds; i++) {
         const XPred *pr = &st->preds[i];
+        if (pr->is_path) {
+            /* 子路径谓词：子树存在匹配（仅顶层窗口段） */
+            if (!seg->top)
+                return 0;
+            if (!has_subpath(walker, seg->el, pr->sub))
+                return 0;
+            continue;
+        }
         if (pr->attr == XP_ATTR_PID) {
             /* @Pid：顶层窗口段的进程 ID（十进制字符串比较） */
             if (!seg->top) {
@@ -561,7 +725,8 @@ static int seg_matches(const Seg *seg, const XStep *st) {
 /* 路径模式匹配：segs 为该节点从根起的完整祖先链，steps 为 XPath 各步。
  * 末段（steps 最后一段）必须匹配节点自身（链最后一段）；
  * 非 descendant 步严格逐级；descendant 步（//）跳过任意深度找匹配段 */
-static int path_match(const Seg *segs, int depth, const XPath *xp) {
+static int path_match(IUIAutomationTreeWalker *walker, const Seg *segs, int depth,
+                      const XPath *xp) {
     int i = 0, j = 0;
     while (j < xp->n) {
         const XStep *st = &xp->steps[j];
@@ -569,10 +734,10 @@ static int path_match(const Seg *segs, int depth, const XPath *xp) {
         if (st->descendant) {
             if (last) {
                 /* 末段（//B）：节点自身（链最后一段）必须匹配 */
-                return depth > 0 && seg_matches(&segs[depth - 1], st);
+                return depth > 0 && seg_matches(walker, &segs[depth - 1], st);
             }
             int k = i;
-            while (k < depth && !seg_matches(&segs[k], st))
+            while (k < depth && !seg_matches(walker, &segs[k], st))
                 k++;
             if (k >= depth)
                 return 0;
@@ -580,7 +745,7 @@ static int path_match(const Seg *segs, int depth, const XPath *xp) {
         } else {
             if (i >= depth)
                 return 0;
-            if (!seg_matches(&segs[i], st))
+            if (!seg_matches(walker, &segs[i], st))
                 return 0;
             i++;
         }
@@ -705,7 +870,7 @@ static void walk_nodes(ListCtx *ctx, IUIAutomationTreeWalker *walker,
         ctx->segs[ctx->depth].el = child;
         ctx->segs[ctx->depth].cnt = cnt;
         ctx->depth++;
-        int matched = !ctx->xp || path_match(ctx->segs, ctx->depth, ctx->xp);
+        int matched = !ctx->xp || path_match(walker, ctx->segs, ctx->depth, ctx->xp);
         ctx->depth--;
 
         if (matched) {
@@ -772,7 +937,7 @@ static void walk_root(ListCtx *ctx, IUIAutomationTreeWalker *walker,
     ctx->segs[0].top = top;
     ctx->segs[0].hwnd = root_hwnd;
     ctx->depth = 1;
-    if (!ctx->xp || path_match(ctx->segs, 1, ctx->xp)) {
+    if (!ctx->xp || path_match(walker, ctx->segs, 1, ctx->xp)) {
         BSTR bname = NULL;
         char *name = NULL;
         if (SUCCEEDED(root->lpVtbl->get_CachedName(root, &bname)) && bname) {
@@ -805,11 +970,27 @@ static int xpath_max_depth(const XPath *xp) {
     return xp->n;
 }
 
+/* 子路径谓词位置检查：allow_first=1（全局模式）时仅第一段（顶层窗口段）允许 */
+static int check_subpath_placement(const XPath *xp, int allow_first,
+                                   char *err, size_t errlen) {
+    for (int i = 0; i < xp->n; i++) {
+        for (int j = 0; j < xp->steps[i].npreds; j++) {
+            if (xp->steps[i].preds[j].is_path && (!allow_first || i > 0)) {
+                snprintf(err, errlen, "子路径谓词仅支持顶层窗口段（list 全局模式第一段）");
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 int uia_list(Uia *u, const char *xpath, int json, char *err, size_t errlen, SB *out) {
     XPath xp;
     const XPath *xp_ptr = NULL;
     if (xpath && xpath[0] && strcmp(xpath, "/") != 0) {
         if (!parse_xpath(xpath, &xp, err, errlen))
+            return 0;
+        if (!check_subpath_placement(&xp, 0, err, errlen))
             return 0;
         xp_ptr = &xp;
     }
@@ -859,6 +1040,8 @@ static int win_prefilter(HWND hwnd, const XStep *st) {
 
     for (int i = 0; i < st->npreds; i++) {
         const XPred *pr = &st->preds[i];
+        if (pr->is_path)
+            continue; /* 子路径谓词无法 Win32 预筛，由 seg_matches 求值 */
         int ok = 1;
         if (pr->attr == XP_ATTR_PID) {
             ok = str_match(pid_buf, pr->val, pr->op);
@@ -940,7 +1123,7 @@ static void process_root(ListCtx *ctx, IUIAutomationTreeWalker *walker,
     /* 根段匹配检查：非 descendant 首段不匹配则跳过整树遍历 */
     if (first_direct) {
         Seg root_seg = {root, cnt, 1, rhwnd};
-        if (!seg_matches(&root_seg, first_st))
+        if (!seg_matches(walker, &root_seg, first_st))
             return;
     }
 
@@ -960,6 +1143,8 @@ int uia_list_all(int all, const char *xpath, int json, char *err, size_t errlen,
     const XPath *xp_ptr = NULL;
     if (xpath && xpath[0] && strcmp(xpath, "/") != 0) {
         if (!parse_xpath(xpath, &xp, err, errlen))
+            return 0;
+        if (!check_subpath_placement(&xp, 1, err, errlen))
             return 0;
         xp_ptr = &xp;
     }
