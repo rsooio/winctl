@@ -261,7 +261,7 @@ static int el_matches_cached(IUIAutomationElement *el, const XStep *st) {
     for (int i = 0; i < st->npreds; i++) {
         const XPred *pr = &st->preds[i];
         if (pr->attr == XP_ATTR_PID)
-            return 0; /* @Pid 由 seg_matches 处理 */
+            continue; /* @Pid 已由 seg_matches（顶层窗口段）验证，这里跳过避免二次求值失败 */
         if (pr->attr == XP_ATTR_TYPE) {
             CONTROLTYPEID ct = 0;
             el->lpVtbl->get_CachedControlType(el, &ct);
@@ -1333,11 +1333,37 @@ int uia_click(Uia *u, void *elv, const char *action, const char *button, int for
         return 1;
     }
 
-    /* 后台：投递到 rect 中心处最顶层的窗口（WindowFromPoint），坐标换算到其客户区 */
-    POINT pt = {sx, sy};
-    HWND ehwnd = WindowFromPoint(pt);
-    if (!ehwnd)
-        ehwnd = u->hwnd;
+    /* 后台：投递到元素自身的窗口句柄（NativeWindowHandle），无独立句柄则沿
+     * UIA 树向上找最近的有句柄祖先，最后退到根窗口。
+     * 不用 WindowFromPoint：窗口被其他窗口遮挡时它会取到错误的顶层窗口 */
+    HWND ehwnd = u->hwnd;
+    IUIAutomationElement *e = el;
+    for (;;) {
+        VARIANT v;
+        VariantInit(&v);
+        if (SUCCEEDED(e->lpVtbl->GetCurrentPropertyValue(e, UIA_NativeWindowHandlePropertyId, &v))) {
+            if (V_VT(&v) == VT_I4 && V_I4(&v) != 0) {
+                ehwnd = (HWND)(INT_PTR)V_I4(&v);
+                VariantClear(&v);
+                break;
+            } else if (V_VT(&v) == VT_UI4 && V_UI4(&v) != 0) {
+                ehwnd = (HWND)(ULONG_PTR)V_UI4(&v);
+                VariantClear(&v);
+                break;
+            }
+        }
+        VariantClear(&v);
+        if (e == u->root)
+            break;
+        IUIAutomationElement *parent = NULL;
+        if (FAILED(((IUIAutomationTreeWalker *)u->walker)->lpVtbl->GetParentElement(u->walker, e, &parent)) || !parent)
+            break;
+        if (e != el)
+            e->lpVtbl->Release(e);
+        e = parent;
+    }
+    if (e != el)
+        e->lpVtbl->Release(e);
     POINT origin = {0, 0};
     ClientToScreen(ehwnd, &origin);
     LPARAM lp = MAKELPARAM(sx - origin.x, sy - origin.y);
