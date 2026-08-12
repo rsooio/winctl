@@ -1567,6 +1567,7 @@ int uia_click(Uia *u, void *elv, const char *action, const char *button, int for
 }
 
 int uia_set_value(Uia *u, void *elv, const char *value) {
+    (void)u;
     IUIAutomationElement *el = elv;
     IUIAutomationValuePattern *vp = NULL;
     if (SUCCEEDED(el->lpVtbl->GetCurrentPatternAs(el, UIA_ValuePatternId,
@@ -1579,14 +1580,8 @@ int uia_set_value(Uia *u, void *elv, const char *value) {
         if (SUCCEEDED(hr))
             return 1;
     }
-    /* 回退：聚焦 + 剪贴板 + Ctrl+A / Ctrl+V */
-    el->lpVtbl->SetFocus(el);
-    SetForegroundWindow(u->hwnd);
-    Sleep(20);
-    win_set_clipboard(value);
-    win_tap_combo(VK_CONTROL, 'A');
-    win_tap_combo(VK_CONTROL, 'V');
-    return 1;
+    /* 无 ValuePattern 或 SetValue 失败：直接报错，不做剪贴板回退（回退无反馈，易伪装成功） */
+    return 0;
 }
 
 int uia_focus(Uia *u, void *elv) {

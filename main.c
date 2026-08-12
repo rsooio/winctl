@@ -126,12 +126,17 @@ static int uia_locate(const char *loc, Uia *u, void **el_out, const char **xp_ou
     const char *xp;
     if (!parse_locator(loc, hwnd_buf, sizeof hwnd_buf, &xp))
         return fail(1, "locator 无效");
-    if (!uia_init(u, hwnd_buf))
-        return fail(2, "窗口句柄无效");
+    if (!uia_init(u, hwnd_buf)) {
+        char msg[160];
+        snprintf(msg, sizeof msg, "窗口句柄无效: 0x%s", hwnd_buf);
+        return fail(2, msg);
+    }
     void *el = uia_find(u, xp);
     if (!el) {
         uia_free(u);
-        return fail(3, "元素未找到");
+        char msg[160];
+        snprintf(msg, sizeof msg, "元素未找到: %s", xp ? xp : "(root)");
+        return fail(3, msg);
     }
     *el_out = el;
     *xp_out = xp;

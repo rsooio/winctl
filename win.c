@@ -46,15 +46,26 @@ int win_enum_top(int all, unsigned long long *hwnds, int max) {
 
 int win_set_window_state(const char *hwnd_str, const char *state) {
     HWND hwnd = parse_hwnd(hwnd_str);
+    if (!IsWindow(hwnd))
+        return 0;
     int cmd;
-    if (strcmp(state, "maximized") == 0)
+    int want_max = 0, want_min = 0;
+    if (strcmp(state, "maximized") == 0) {
         cmd = SW_MAXIMIZE;
-    else if (strcmp(state, "minimized") == 0)
+        want_max = 1;
+    } else if (strcmp(state, "minimized") == 0) {
         cmd = SW_MINIMIZE;
-    else
+        want_min = 1;
+    } else {
         cmd = SW_RESTORE;
+    }
     ShowWindow(hwnd, cmd);
-    return 1;
+    /* 验证目标状态（ShowWindow 返回值不可靠） */
+    if (want_max)
+        return IsZoomed(hwnd) ? 1 : 0;
+    if (want_min)
+        return IsIconic(hwnd) ? 1 : 0;
+    return (IsZoomed(hwnd) || IsIconic(hwnd)) ? 0 : 1;
 }
 
 int win_close_window(const char *hwnd_str) {
