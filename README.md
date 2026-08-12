@@ -54,7 +54,7 @@ Sub-path predicates (existence check, top-level window step only, e.g. `list /Wi
 | key | Access | Description |
 |---|---|---|
 | `value` | read/write | ValuePattern read/write; falls back to focus + clipboard input |
-| `state` | read/write | Window state, `normal`/`maximized`/`minimized` |
+| `state` | read/write | Window state, `normal`/`maximized`/`minimized`; write `closed` to close (WM_CLOSE, async) |
 | `pid` | read-only | Process ID of the element's window handle (decimal) |
 
 ## Examples

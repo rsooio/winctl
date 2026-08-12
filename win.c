@@ -57,6 +57,11 @@ int win_set_window_state(const char *hwnd_str, const char *state) {
     return 1;
 }
 
+int win_close_window(const char *hwnd_str) {
+    HWND hwnd = parse_hwnd(hwnd_str);
+    return PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0;
+}
+
 int win_get_window_state(const char *hwnd_str, char *out, size_t cap) {
     HWND hwnd = parse_hwnd(hwnd_str);
     if (IsZoomed(hwnd))

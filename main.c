@@ -236,6 +236,10 @@ static int cmd_prop(int argc, char **argv, int a, int json) {
             char st[16];
             win_get_window_state(hb, st, sizeof st);
             printf("%s\n", st);
+        } else if (strcmp(val, "closed") == 0) {
+            /* 关闭窗口（WM_CLOSE，异步投递） */
+            if (!win_close_window(hb))
+                rc = fail(4, "关闭窗口失败");
         } else {
             /* 写窗口状态 */
             if (!win_set_window_state(hb, val))
