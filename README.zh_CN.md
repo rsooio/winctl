@@ -35,11 +35,11 @@ winctl --help
 ### locator
 
 ```
-<hwnd>            根元素（16 进制，0x 前缀可选）；可为任意窗口/元素句柄，
+<hwnd>            根元素自身（16 进制，0x 前缀可选）；可为任意窗口/元素句柄，
                   list 输出列的 hwnd 可直接作为根
-<hwnd>/<xpath>    定位其下元素，xpath 相对该根；首段必须匹配根元素类型，
-                  深层元素用完整路径（含根类型段）或以元素 hwnd 为根
-/<xpath>          list 全局查询：xpath 从虚拟根求值（所有顶层窗口），
+<hwnd>/<xpath>    相对该根向下定位：首段匹配根的子级，根自身不参与 xpath；
+                  链式定位即字符串拼接（list 输出 xpath + hwnd 前缀直接复用）
+/<xpath>          list 全局查询：xpath 从虚拟根（所有顶层窗口）求值，
                   首段 /Window 匹配顶层窗口，//Window 匹配任意深度
 ```
 
@@ -67,7 +67,7 @@ winctl prop 0x1a2b value                     # 读值
 winctl prop 0x1a2b value 文本                # 写值
 winctl prop 0x1a2b state maximized           # 最大化窗口
 winctl prop 0x1a2b pid                       # 读进程 ID
-winctl click 0x1a2b/Window/Pane/Button       # 点击
+winctl click 0x1a2b/Pane/Button       # 点击
 ```
 
 顶层窗口定位仅支持属性谓词（`[@Name]`/`[@Pid]`/`[@Class]`），不支持位置谓词 `[n]`（顶层窗口序号依 Z 序变化，不稳定）；树内 `[n]` 为兄弟序，结构稳定可用。

@@ -95,7 +95,6 @@ typedef struct {
 
 struct XPath { XStep steps[32]; int n; };
 
-static int type_name_ct(IUIAutomationElement *el, const char *name);
 static int el_matches(IUIAutomationTreeWalker *walker, IUIAutomationElement *el,
                      const XStep *st);
 static IUIAutomationElement *step_walk(Uia *u, IUIAutomationElement *from,
@@ -542,34 +541,16 @@ void *uia_find(Uia *u, const char *xpath) {
     if (!parse_xpath(xpath, &xp, err, sizeof err))
         return NULL;
 
-    /* 起点：根元素 */
+    /* xpath 相对根元素向下：每段从上一段命中的元素出发，首段即根的子级，
+     * 根自身不参与匹配；链式定位（结果 hwnd + xpath）等价于字符串拼接 */
     IUIAutomationElement *cur = root;
     cur->lpVtbl->AddRef(cur);
 
     for (int i = 0; i < xp.n; i++) {
         XStep *st = &xp.steps[i];
-        int first = (i == 0);
-        IUIAutomationElement *next = NULL;
-
-        if (first) {
-            /* 第一段：根自身 → 子级 → 整棵子树，依次尝试 */
-            if (!st->pos && !st->npreds &&
-                (strcmp(st->name, "*") == 0 ||
-                 (st->name[0] && type_name_ct(cur, st->name)))) {
-                next = cur; /* 根自身命中，继续下一段 */
-            } else {
-                next = step_find(u, cur, st, 0);
-                if (!next)
-                    next = step_find(u, cur, st, 1);
-            }
-        } else {
-            next = step_find(u, cur, st, st->descendant);
-        }
-
-        if (next != cur) {
-            cur->lpVtbl->Release(cur);
-            cur = next;
-        }
+        IUIAutomationElement *next = step_find(u, cur, st, st->descendant);
+        cur->lpVtbl->Release(cur);
+        cur = next;
         if (!cur)
             return NULL;
     }
@@ -862,10 +843,17 @@ static void walk_nodes(ListCtx *ctx, IUIAutomationTreeWalker *walker,
         *count = cnt;
 
         char *own = malloc(strlen(px) + strlen(tn) + 16);
-        if (cnt > 1)
+        if (px[1] == '\0') {
+            /* px 为根路径 "/"：子级路径不带双斜杠 */
+            if (cnt > 1)
+                sprintf(own, "/%s[%d]", tn, cnt);
+            else
+                sprintf(own, "/%s", tn);
+        } else if (cnt > 1) {
             sprintf(own, "%s/%s[%d]", px, tn, cnt);
-        else
+        } else {
             sprintf(own, "%s/%s", px, tn);
+        }
 
         ctx->segs[ctx->depth].el = child;
         ctx->segs[ctx->depth].cnt = cnt;
@@ -926,18 +914,23 @@ static void walk_nodes(ListCtx *ctx, IUIAutomationTreeWalker *walker,
     }
 }
 
-/* 遍历单根：root 为窗口元素（段 0），输出匹配子树。top=1 时该段支持 @Pid 谓词 */
+/* 遍历单根：root_in_path=1（全局模式）时根段（顶层窗口）参与 path_match 首段
+ * 匹配并支持 @Pid/子路径谓词；=0（单窗口模式）时 xpath 相对根向下，
+ * 根自身不参与匹配（子级从 segs[0] 起） */
 static void walk_root(ListCtx *ctx, IUIAutomationTreeWalker *walker,
                       IUIAutomationCacheRequest *cache, Uia *u,
                       IUIAutomationElement *root, const char *root_type,
-                      int root_cnt, int top, unsigned long long root_hwnd,
+                      int root_cnt, int root_in_path, unsigned long long root_hwnd,
                       const char *root_xpath) {
-    ctx->segs[0].el = root;
-    ctx->segs[0].cnt = root_cnt;
-    ctx->segs[0].top = top;
-    ctx->segs[0].hwnd = root_hwnd;
-    ctx->depth = 1;
-    if (!ctx->xp || path_match(walker, ctx->segs, 1, ctx->xp)) {
+    ctx->depth = 0;
+    if (root_in_path) {
+        ctx->segs[0].el = root;
+        ctx->segs[0].cnt = root_cnt;
+        ctx->segs[0].top = 1;
+        ctx->segs[0].hwnd = root_hwnd;
+        ctx->depth = 1;
+    }
+    if (!ctx->xp || (root_in_path && path_match(walker, ctx->segs, 1, ctx->xp))) {
         BSTR bname = NULL;
         char *name = NULL;
         if (SUCCEEDED(root->lpVtbl->get_CachedName(root, &bname)) && bname) {
@@ -1003,17 +996,15 @@ int uia_list(Uia *u, const char *xpath, int json, char *err, size_t errlen, SB *
     ctx.xp = xp_ptr;
     ctx.max_depth = xpath_max_depth(xp_ptr);
 
-    /* 根元素 */
+    /* 根元素：xpath 相对根向下，根自身不参与匹配（根行 xpath 为 /） */
     IUIAutomationElement *root = u->root;
     CONTROLTYPEID rct = 0;
     root->lpVtbl->get_CachedControlType(root, &rct);
     const char *rtn = type_name(rct);
     if (!rtn) rtn = "Custom";
-    char root_xpath[64];
-    snprintf(root_xpath, sizeof root_xpath, "/%s", rtn);
 
-    walk_root(&ctx, u->walker, u->cache, u, root, rtn, 1, 1,
-              (unsigned long long)(ULONG_PTR)u->hwnd, root_xpath);
+    walk_root(&ctx, u->walker, u->cache, u, root, rtn, 0, 0,
+              (unsigned long long)(ULONG_PTR)u->hwnd, "/");
 
     if (!json)
         list_emit_cols(&ctx, out);
@@ -1350,11 +1341,8 @@ int uia_element_prop(Uia *u, void *elv, const char *xpath, int json, SB *out) {
 
     if (xpath && !xpath[0])
         xpath = NULL;
-    char root_path[64];
-    if (!xpath) {
-        snprintf(root_path, sizeof root_path, "/%s", tn);
-        xpath = root_path;
-    }
+    if (!xpath)
+        xpath = "/"; /* 根自身：xpath 相对根，根行路径为 / */
 
     if (json) {
         out_element_json(out, name, value, enabled ? 1 : 0, isinvoke, isscroll,
@@ -1608,10 +1596,3 @@ char *uia_get_value(Uia *u, void *elv) {
 }
 
 /* ---------- 辅助 ---------- */
-
-static int type_name_ct(IUIAutomationElement *el, const char *name) {
-    CONTROLTYPEID ct = 0;
-    el->lpVtbl->get_CurrentControlType(el, &ct);
-    const char *tn = type_name(ct);
-    return tn && strcmp(tn, name) == 0;
-}

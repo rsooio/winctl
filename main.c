@@ -346,13 +346,12 @@ static void usage(void) {
     puts("    prop/click/focus 的 locator 取第一个匹配；list 是唯一集合语义命令");
     puts("");
     puts("LOCATOR");
-    puts("    <hwnd>            根元素（16 进制，0x 前缀可选）；可为任意窗口/元素句柄，");
+    puts("    <hwnd>            根元素自身（16 进制，0x 前缀可选）；可为任意窗口/元素句柄，");
     puts("                      list 输出列的 hwnd 可直接作为根");
-    puts("    <hwnd>/<xpath>    定位其下元素，xpath 相对该根；首段必须匹配根元素类型，");
-    puts("                      深层元素用完整路径（含根类型段）或以元素 hwnd 为根");
-    puts("    /<xpath>          list 全局查询：xpath 从虚拟根求值（所有顶层窗口），");
-    puts("                      首段 /Window 匹配顶层窗口（仅支持属性谓词，不支持 [n]），");
-    puts("                      //Window 匹配任意深度");
+    puts("    <hwnd>/<xpath>    相对该根向下定位：首段匹配根的子级，根自身不参与 xpath；");
+    puts("                      链式定位即字符串拼接（list 输出 xpath + hwnd 前缀直接复用）");
+    puts("    /<xpath>          list 全局查询：虚拟根 = 所有顶层窗口；首段 /Window 匹配");
+    puts("                      顶层窗口（仅支持属性谓词，不支持 [n]），//Window 任意深度");
     puts("    xpath 语法: / // * [n] 位置谓词（树内）、[@Name=''] [@Type=''] [@Id=''] [@Class=''] [@Pid='']");
     puts("                属性谓词（@Pid 仅顶层窗口段）、*= 包含 ^= 前缀 $= 后缀、and、!=");
     puts("");
@@ -380,7 +379,7 @@ static void usage(void) {
     puts("    winctl prop 0x1a2b value 文本               写值");
     puts("    winctl prop 0x1a2b state maximized          最大化窗口");
     puts("    winctl prop 0x1a2b pid                      读进程 ID");
-    puts("    winctl click 0x1a2b/Window/Pane/Button      点击");
+    puts("    winctl click 0x1a2b/Pane/Button      点击");
     puts("");
     puts("    顶层窗口定位仅支持属性谓词（[@Name]/[@Pid]/[@Class]），不支持位置谓词 [n]");
     puts("    （顶层窗口序号依 Z 序变化，不稳定）；树内 [n] 为兄弟序，结构稳定可用");

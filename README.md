@@ -35,11 +35,12 @@ winctl --help
 ## Locator
 
 ```
-<hwnd>             Root element (hex, 0x prefix optional); any window/element handle,
+<hwnd>             Root element itself (hex, 0x prefix optional); any window/element handle,
                   the hwnd column of list output can be used as a root
-<hwnd>/<xpath>     Locate elements below it; xpath is relative to the root;
-                  the first step must match the root element type; use the full
-                  path (with root type step) or an element hwnd for deep targets
+<hwnd>/<xpath>     Locate below the root; the first step matches a child of
+                  the root; the root itself never participates in the xpath.
+                  Chained locating is string concatenation (list output xpath
+                  + hwnd prefix is directly reusable)
 /<xpath>          list global query: xpath evaluated from the virtual root
                   (all top-level windows); /Window matches top-level windows,
                   //Window matches any depth
@@ -71,7 +72,7 @@ winctl prop 0x1a2b value                    # read value
 winctl prop 0x1a2b value text               # write value
 winctl prop 0x1a2b state maximized          # maximize window
 winctl prop 0x1a2b pid                      # read process ID
-winctl click 0x1a2b/Window/Pane/Button      # click
+winctl click 0x1a2b/Pane/Button      # click
 ```
 
 Top-level window positioning supports attribute predicates only (`[@Name]`/`[@Pid]`/`[@Class]`); positional `[n]` on top-level windows is rejected (Z-order unstable). In-tree `[n]` is sibling order and stable.
