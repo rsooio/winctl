@@ -29,8 +29,10 @@ int uia_list(Uia *u, const char *xpath, int json, char *err, size_t errlen, SB *
 int uia_list_all(int all, const char *xpath, int json, char *err, size_t errlen,
                  SB *out);
 
-/* XPath 定位第一个匹配（引用 +1，调用方 Release），xpath 为 NULL/空 = 根元素 */
-void *uia_find(Uia *u, const char *xpath);
+/* XPath 定位（严格唯一）：xpath 为 NULL/空 = 根元素。
+ * 恰好 1 个匹配返回元素（引用 +1，调用方 Release）；
+ * 0 个或多个匹配返回 NULL，err 写入错误描述（多个时列出候选路径） */
+void *uia_find(Uia *u, const char *xpath, char *err, size_t errlen);
 /* 释放 uia_find 返回的元素 */
 void uia_release_element(void *el);
 

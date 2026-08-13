@@ -97,8 +97,6 @@ struct XPath { XStep steps[32]; int n; };
 
 static int el_matches(IUIAutomationTreeWalker *walker, IUIAutomationElement *el,
                      const XStep *st);
-static IUIAutomationElement *step_walk(Uia *u, IUIAutomationElement *from,
-                                       const XStep *st);
 
 static int has_subpath(IUIAutomationTreeWalker *walker, IUIAutomationElement *root,
                       const XPath *sub);
@@ -436,125 +434,9 @@ static int el_matches(IUIAutomationTreeWalker *walker, IUIAutomationElement *el,
     return 1;
 }
 
-/* ---------- 定位求值（取第一个） ---------- */
-
-static IUIAutomationElement *step_find(Uia *u, IUIAutomationElement *from,
-                                       const XStep *st, int subtree) {
-    IUIAutomation *uia = u->uia;
-    if (!subtree)
-        return step_walk(u, from, st);
-
-    /* 降级路径（//）：FindAll 只做宽筛选（ControlView + 类型）。
-     * 属性谓词（Name 等）与位置在客户端用 el_matches 过滤——
-     * PropertyCondition 的属性匹配依赖 provider 端实现，部分应用（XAML）不支持 Name 条件 */
-    IUIAutomationCondition *cond = NULL;
-    uia->lpVtbl->get_ControlViewCondition(uia, &cond);
-    if (strcmp(st->name, "*") != 0) {
-        VARIANT v;
-        VariantInit(&v);
-        V_VT(&v) = VT_I4;
-        V_I4(&v) = name_type(st->name);
-        if (V_I4(&v) < 0) {
-            VariantClear(&v);
-            if (cond) cond->lpVtbl->Release(cond);
-            return NULL;
-        }
-        IUIAutomationCondition *pc = NULL;
-        uia->lpVtbl->CreatePropertyCondition(uia, UIA_ControlTypePropertyId, v, &pc);
-        VariantClear(&v);
-        if (cond && pc) {
-            IUIAutomationCondition *ac = NULL;
-            uia->lpVtbl->CreateAndCondition(uia, cond, pc, &ac);
-            cond->lpVtbl->Release(cond);
-            pc->lpVtbl->Release(pc);
-            cond = ac;
-        } else if (pc) {
-            cond = pc;
-        }
-    }
-
-    IUIAutomationElementArray *arr = NULL;
-    from->lpVtbl->FindAll(from, 7, cond, &arr);
-    if (cond)
-        cond->lpVtbl->Release(cond);
-    if (!arr)
-        return NULL;
-
-    int n = 0;
-    arr->lpVtbl->get_Length(arr, &n);
-    IUIAutomationElement *found = NULL;
-    int count = 0;
-    for (int i = 0; i < n && !found; i++) {
-        IUIAutomationElement *el = NULL;
-        arr->lpVtbl->GetElement(arr, i, &el);
-        if (!el)
-            continue;
-        if (el_matches(NULL, el, st)) {
-            count++;
-            if (st->pos == 0 || count == st->pos)
-                found = el; /* 引用来自 GetElement，保留 */
-            else
-                el->lpVtbl->Release(el);
-        } else {
-            el->lpVtbl->Release(el);
-        }
-    }
-    arr->lpVtbl->Release(arr);
-    return found;
-}
-
-/* 手动遍历 ControlView 子级（与集合求值同视图同顺序），返回第 pos 个匹配（pos==0 取第一个） */
-static IUIAutomationElement *step_walk(Uia *u, IUIAutomationElement *from,
-                                       const XStep *st) {
-    IUIAutomationTreeWalker *walker = u->walker;
-    int n = 0;
-    IUIAutomationElement *child = NULL;
-    walker->lpVtbl->GetFirstChildElement(walker, from, &child);
-    while (child) {
-        if (el_matches(NULL, child, st)) {
-            n++;
-            if (st->pos == 0 || n == st->pos)
-                return child; /* 引用来自 GetFirstChildElement，调用方负责 Release */
-        }
-        IUIAutomationElement *next = NULL;
-        walker->lpVtbl->GetNextSiblingElement(walker, child, &next);
-        child->lpVtbl->Release(child);
-        child = next;
-    }
-    return NULL;
-}
-
 void uia_release_element(void *el) {
     if (el)
         ((IUIAutomationElement *)el)->lpVtbl->Release(el);
-}
-
-void *uia_find(Uia *u, const char *xpath) {
-    IUIAutomationElement *root = u->root;
-    if (!xpath || !xpath[0]) {
-        /* 根元素 */
-        root->lpVtbl->AddRef(root);
-        return root;
-    }
-    char err[128];
-    XPath xp;
-    if (!parse_xpath(xpath, &xp, err, sizeof err))
-        return NULL;
-
-    /* xpath 相对根元素向下：每段从上一段命中的元素出发，首段即根的子级，
-     * 根自身不参与匹配；链式定位（结果 hwnd + xpath）等价于字符串拼接 */
-    IUIAutomationElement *cur = root;
-    cur->lpVtbl->AddRef(cur);
-
-    for (int i = 0; i < xp.n; i++) {
-        XStep *st = &xp.steps[i];
-        IUIAutomationElement *next = step_find(u, cur, st, st->descendant);
-        cur->lpVtbl->Release(cur);
-        cur = next;
-        if (!cur)
-            return NULL;
-    }
-    return cur;
 }
 
 /* ---------- JSON 输出 ---------- */
@@ -703,55 +585,275 @@ static int seg_matches(IUIAutomationTreeWalker *walker, const Seg *seg, const XS
     return el_matches_cached(seg->el, st);
 }
 
-/* 路径模式匹配：segs 为该节点从根起的完整祖先链，steps 为 XPath 各步。
- * 末段（steps 最后一段）必须匹配节点自身（链最后一段）；
- * 非 descendant 步严格逐级；descendant 步（//）跳过任意深度找匹配段 */
-static int path_match(IUIAutomationTreeWalker *walker, const Seg *segs, int depth,
-                      const XPath *xp) {
-    int i = 0, j = 0;
-    while (j < xp->n) {
-        const XStep *st = &xp->steps[j];
-        int last = (j == xp->n - 1);
-        if (st->descendant) {
-            if (last) {
-                /* 末段（//B）：节点自身（链最后一段）必须匹配 */
-                return depth > 0 && seg_matches(walker, &segs[depth - 1], st);
-            }
-            int k = i;
-            while (k < depth && !seg_matches(walker, &segs[k], st))
-                k++;
-            if (k >= depth)
-                return 0;
-            i = k + 1;
-        } else {
-            if (i >= depth)
-                return 0;
-            if (!seg_matches(walker, &segs[i], st))
-                return 0;
-            i++;
-        }
-        j++;
-    }
-    return i == depth;
-}
-
-typedef struct {
+typedef struct ListRow_ {
     char *xpath;
     char *name;
     unsigned long long hwnd;
 } ListRow;
 
-typedef struct {
+typedef struct ListCtx_ {
     SB *out;
     int json;
     int first;          /* JSON 数组元素分隔 */
     ListRow *rows;      /* 列模式收集 */
     int n, cap;
-    const XPath *xp;    /* NULL = 全部 */
-    int max_depth;      /* 无 descendant 段时的匹配深度，超深子树不访问；0 = 不限 */
-    Seg segs[64];
-    int depth;
 } ListCtx;
+
+/* ---------- 步进求值（list 核心） ----------
+ * 与定位（uia_find 的 step_walk/step_find）同语义同口径：自顶向下逐段展开，
+ * 非 // 段从上一段候选的子级找（FindAllBuildCache(Children) 一次取全子级），
+ * // 段从候选子树任意深度找（FindAllBuildCache(7) 宽筛），谓词客户端过滤，
+ * [n] 为完整匹配计数。候选 xpath 由步进携带或回溯父链生成 */
+
+/* 候选：匹配元素 + 相对上一段起点的路径（"" = 起点自身） */
+typedef struct {
+    IUIAutomationElement *el;
+    char *path;
+} Cand;
+
+typedef struct { Cand *v; int n, cap; } CandList;
+
+static void cand_push(CandList *cl, IUIAutomationElement *el, char *path) {
+    if (cl->n >= cl->cap) {
+        cl->cap = cl->cap ? cl->cap * 2 : 16;
+        cl->v = realloc(cl->v, cl->cap * sizeof *cl->v);
+    }
+    cl->v[cl->n].el = el;
+    cl->v[cl->n].path = path;
+    cl->n++;
+}
+
+static void cand_free(CandList *cl) {
+    for (int i = 0; i < cl->n; i++) {
+        cl->v[i].el->lpVtbl->Release(cl->v[i].el);
+        free(cl->v[i].path);
+    }
+    free(cl->v);
+    memset(cl, 0, sizeof *cl);
+}
+
+static char *path_append(const char *px, const char *tn, int cnt) {
+    size_t n = strlen(px) + strlen(tn) + 24;
+    char *r = malloc(n);
+    if (cnt > 1)
+        snprintf(r, n, "%s/%s[%d]", px, tn, cnt);
+    else
+        snprintf(r, n, "%s/%s", px, tn);
+    return r;
+}
+
+/* el 在父下的同类型兄弟序（从 1 起）；未找到返回 0（树已变化） */
+static int sibling_index(IUIAutomation *uia, IUIAutomationTreeWalker *walker,
+                         IUIAutomationCacheRequest *cache,
+                         IUIAutomationElement *parent, IUIAutomationElement *el,
+                         CONTROLTYPEID ct) {
+    int idx = 0;
+    IUIAutomationElement *child = NULL;
+    walker->lpVtbl->GetFirstChildElementBuildCache(walker, parent, cache, &child);
+    while (child) {
+        CONTROLTYPEID cct = 0;
+        child->lpVtbl->get_CachedControlType(child, &cct);
+        if (cct == ct)
+            idx++;
+        BOOL same = FALSE;
+        uia->lpVtbl->CompareElements(uia, el, child, &same);
+        IUIAutomationElement *next = NULL;
+        if (!same)
+            walker->lpVtbl->GetNextSiblingElementBuildCache(walker, child, cache, &next);
+        child->lpVtbl->Release(child);
+        if (same)
+            return idx;
+        child = next;
+    }
+    return 0;
+}
+
+/* 生成 el 相对 from（不含 from 自身）的路径：回溯父链，每段类型 + 同类型兄弟序。
+ * 失败（provider 不支持 GetParentElement / 树变化）返回 NULL */
+static char *backtrack_path(IUIAutomation *uia, IUIAutomationTreeWalker *walker,
+                            IUIAutomationCacheRequest *cache,
+                            IUIAutomationElement *from, IUIAutomationElement *el) {
+    IUIAutomationElement *ups[64]; /* ups[0]=el 的父 … ups[k-1]=from 的直接子级 */
+    int k = 0;
+    IUIAutomationElement *cur = el;
+    for (;;) {
+        IUIAutomationElement *parent = NULL;
+        walker->lpVtbl->GetParentElementBuildCache(walker, cur, cache, &parent);
+        if (!parent)
+            goto fail;
+        BOOL same = FALSE;
+        uia->lpVtbl->CompareElements(uia, from, parent, &same);
+        if (same) {
+            parent->lpVtbl->Release(parent);
+            break;
+        }
+        if (k >= (int)(sizeof ups / sizeof ups[0])) {
+            parent->lpVtbl->Release(parent);
+            goto fail;
+        }
+        ups[k++] = parent;
+        cur = parent;
+    }
+    SB sb;
+    sb_init(&sb);
+    for (int i = k - 1; i >= 0; i--) {
+        IUIAutomationElement *par = (i == k - 1) ? from : ups[i + 1];
+        CONTROLTYPEID ct = 0;
+        ups[i]->lpVtbl->get_CachedControlType(ups[i], &ct);
+        const char *tn = type_name(ct);
+        if (!tn) tn = "Custom";
+        int idx = sibling_index(uia, walker, cache, par, ups[i], ct);
+        char *seg = path_append("", tn, idx > 0 ? idx : 1);
+        sb_adds(&sb, seg);
+        free(seg);
+    }
+    {
+        IUIAutomationElement *par = k > 0 ? ups[0] : from;
+        CONTROLTYPEID ct = 0;
+        el->lpVtbl->get_CachedControlType(el, &ct);
+        const char *tn = type_name(ct);
+        if (!tn) tn = "Custom";
+        int idx = sibling_index(uia, walker, cache, par, el, ct);
+        char *seg = path_append("", tn, idx > 0 ? idx : 1);
+        sb_adds(&sb, seg);
+        free(seg);
+    }
+    for (int i = 0; i < k; i++)
+        ups[i]->lpVtbl->Release(ups[i]);
+    return sb.buf;
+fail:
+    for (int i = 0; i < k; i++)
+        ups[i]->lpVtbl->Release(ups[i]);
+    return NULL;
+}
+
+typedef struct {
+    ListCtx *ctx;
+    Uia *u;
+    int top_mode; /* 全局模式：首段 // 时起点自身参与匹配（顶层窗口段） */
+} StepCtx;
+
+static void emit_el(ListCtx *ctx, Uia *u, IUIAutomationElement *el, const char *xpath);
+
+/* 单段候选收集：from 下按 subtree 范围收集匹配 st 的候选（文档序）。
+ * pos==0 全收，pos>0 只收第 pos 个匹配；include_self=1 时 from 自身先参与
+ * 匹配（用 top_seg 语义，@Pid/子路径谓词仅此处生效），其后计数并入 */
+static void collect_cands(StepCtx *s, IUIAutomationElement *from, const XStep *st,
+                          int subtree, int include_self, const Seg *top_seg,
+                          CandList *cl) {
+    Uia *u = s->u;
+    int seen = 0;
+    if (include_self) {
+        int ok = top_seg ? seg_matches(u->walker, top_seg, st)
+                         : el_matches_cached(from, st);
+        if (ok) {
+            seen++;
+            if (st->pos == 0 || st->pos == 1) {
+                from->lpVtbl->AddRef(from); /* 候选持有引用 */
+                cand_push(cl, from, strdup(""));
+            }
+        }
+    }
+
+    int type_id = name_type(st->name);
+    if (strcmp(st->name, "*") != 0 && type_id < 0)
+        return; /* 未知类型名：无候选 */
+
+    IUIAutomation *uia = u->uia;
+    IUIAutomationCondition *cond = NULL;
+    uia->lpVtbl->get_ControlViewCondition(uia, &cond);
+    if (strcmp(st->name, "*") != 0) {
+        VARIANT v;
+        VariantInit(&v);
+        V_VT(&v) = VT_I4;
+        V_I4(&v) = type_id;
+        IUIAutomationCondition *pc = NULL;
+        uia->lpVtbl->CreatePropertyCondition(uia, UIA_ControlTypePropertyId, v, &pc);
+        VariantClear(&v);
+        if (cond && pc) {
+            IUIAutomationCondition *ac = NULL;
+            uia->lpVtbl->CreateAndCondition(uia, cond, pc, &ac);
+            cond->lpVtbl->Release(cond);
+            pc->lpVtbl->Release(pc);
+            cond = ac;
+        } else if (pc) {
+            cond = pc;
+        }
+    }
+
+    IUIAutomationElementArray *arr = NULL;
+    from->lpVtbl->FindAllBuildCache(from, subtree ? 7 : 2, cond, u->cache, &arr);
+    if (cond)
+        cond->lpVtbl->Release(cond);
+    if (!arr)
+        return;
+
+    int n = 0;
+    arr->lpVtbl->get_Length(arr, &n);
+    CONTROLTYPEID last_ct = 0;
+    int cnt = 0;
+    for (int i = 0; i < n; i++) {
+        IUIAutomationElement *el = NULL;
+        arr->lpVtbl->GetElement(arr, i, &el);
+        if (!el)
+            continue;
+        CONTROLTYPEID ct = 0;
+        el->lpVtbl->get_CachedControlType(el, &ct);
+        const char *tn = type_name(ct);
+        if (!tn) tn = "Custom";
+        if (!subtree) {
+            /* 生成路径用：同类型兄弟序（对所有子级计数，与匹配无关） */
+            cnt = (ct == last_ct) ? cnt + 1 : 1;
+            last_ct = ct;
+        }
+        int ok = el_matches_cached(el, st);
+        if (ok)
+            seen++;
+        if (ok && (st->pos == 0 || seen == st->pos)) {
+            char *path = subtree ? backtrack_path(uia, u->walker, u->cache, from, el)
+                                 : path_append("", tn, cnt);
+            if (path)
+                cand_push(cl, el, path);
+            else
+                el->lpVtbl->Release(el);
+            if (st->pos > 0) {
+                arr->lpVtbl->Release(arr);
+                return; /* 第 pos 个已命中，后续不再需要 */
+            }
+        } else {
+            el->lpVtbl->Release(el);
+        }
+    }
+    arr->lpVtbl->Release(arr);
+}
+
+/* 步进递归：from 已匹配 steps[0..si-1]，px 为其路径；逐段展开收集全部匹配 */
+static void steps_walk(StepCtx *s, IUIAutomationElement *from, const XPath *xp,
+                       int si, const char *px, const Seg *top_seg) {
+    const XStep *st = &xp->steps[si];
+    int last = (si == xp->n - 1);
+    CandList cl;
+    memset(&cl, 0, sizeof cl);
+    collect_cands(s, from, st, st->descendant, s->top_mode && si == 0, top_seg, &cl);
+    for (int i = 0; i < cl.n; i++) {
+        size_t n = strlen(px) + strlen(cl.v[i].path) + 1;
+        char *full = malloc(n);
+        snprintf(full, n, "%s%s", px, cl.v[i].path);
+        if (last)
+            emit_el(s->ctx, s->u, cl.v[i].el, full);
+        else
+            steps_walk(s, cl.v[i].el, xp, si + 1, full, NULL);
+        free(full);
+    }
+    cand_free(&cl);
+}
+
+/* 全量输出特判：双斜杠星号（无谓词）等价整树 dump，走整树递归避免逐候选回溯 */
+static int is_full_dump(const XPath *xp) {
+    return xp->n == 1 && xp->steps[0].descendant &&
+           strcmp(xp->steps[0].name, "*") == 0 &&
+           xp->steps[0].pos == 0 && xp->steps[0].npreds == 0;
+}
 
 static void row_push(ListCtx *ctx, const char *xpath, const char *name,
                      unsigned long long hwnd) {
@@ -826,142 +928,84 @@ static void list_emit_cols(ListCtx *ctx, SB *out) {
 }
 
 /* 递归遍历：parent 为已带缓存的元素，px 为其 xpath 前缀 */
-static void walk_nodes(ListCtx *ctx, IUIAutomationTreeWalker *walker,
-                       IUIAutomationCacheRequest *cache, Uia *u,
-                       IUIAutomationElement *parent, const char *px,
-                       CONTROLTYPEID *last_ct, int *count) {
-    IUIAutomationElement *child = NULL;
-    walker->lpVtbl->GetFirstChildElementBuildCache(walker, parent, cache, &child);
-    while (child) {
-        CONTROLTYPEID ct = 0;
-        child->lpVtbl->get_CachedControlType(child, &ct);
-        const char *tn = type_name(ct);
-        if (!tn) tn = "Custom";
-
-        int cnt = (ct == *last_ct) ? (*count + 1) : 1;
-        *last_ct = ct;
-        *count = cnt;
-
-        char *own = malloc(strlen(px) + strlen(tn) + 16);
-        if (px[1] == '\0') {
-            /* px 为根路径 "/"：子级路径不带双斜杠 */
-            if (cnt > 1)
-                sprintf(own, "/%s[%d]", tn, cnt);
-            else
-                sprintf(own, "/%s", tn);
-        } else if (cnt > 1) {
-            sprintf(own, "%s/%s[%d]", px, tn, cnt);
-        } else {
-            sprintf(own, "%s/%s", px, tn);
-        }
-
-        ctx->segs[ctx->depth].el = child;
-        ctx->segs[ctx->depth].cnt = cnt;
-        ctx->depth++;
-        int matched = !ctx->xp || path_match(walker, ctx->segs, ctx->depth, ctx->xp);
-        ctx->depth--;
-
-        if (matched) {
-            BSTR bname = NULL;
-            char *name = NULL;
-            if (SUCCEEDED(child->lpVtbl->get_CachedName(child, &bname)) && bname) {
-                name = w_to_utf8(bname);
-                SysFreeString(bname);
-            }
-            BOOL enabled = FALSE;
-            child->lpVtbl->get_CachedIsEnabled(child, &enabled);
-
-            VARIANT v;
-            int isinvoke = 0, isscroll = 0;
-            VariantInit(&v);
-            if (SUCCEEDED(child->lpVtbl->GetCachedPropertyValue(child, UIA_IsInvokePatternAvailablePropertyId, &v)))
-                isinvoke = (V_VT(&v) == VT_BOOL && V_BOOL(&v) != 0);
-            VariantClear(&v);
-            VariantInit(&v);
-            if (SUCCEEDED(child->lpVtbl->GetCachedPropertyValue(child, UIA_IsScrollPatternAvailablePropertyId, &v)))
-                isscroll = (V_VT(&v) == VT_BOOL && V_BOOL(&v) != 0);
-            VariantClear(&v);
-
-            unsigned long long own_hwnd = cached_own_hwnd(child);
-
-            RECT rect = {0};
-            child->lpVtbl->get_CachedBoundingRectangle(child, &rect);
-
-            emit_node(ctx, own, name, enabled ? 1 : 0, isinvoke, isscroll,
-                      own_hwnd,
-                      rect.left - u->left, rect.top - u->top,
-                      rect.right - u->left, rect.bottom - u->top,
-                      tn);
-            free(name);
-        }
-
-        /* 子级：同类型计数重置；深度限制（无 descendant 段时匹配深度 = 段数，
-         * 更深的子树不可能包含匹配节点，跳过访问） */
-        if (!ctx->max_depth || ctx->depth < ctx->max_depth) {
-            CONTROLTYPEID sub_last = 0;
-            int sub_count = 0;
-            ctx->depth++;
-            walk_nodes(ctx, walker, cache, u, child, own, &sub_last, &sub_count);
-            ctx->depth--;
-        }
-
-        free(own);
-
-        IUIAutomationElement *next = NULL;
-        walker->lpVtbl->GetNextSiblingElementBuildCache(walker, child, cache, &next);
-        child->lpVtbl->Release(child);
-        child = next;
+/* 输出单个匹配元素：读缓存属性 + emit_node */
+static void emit_el(ListCtx *ctx, Uia *u, IUIAutomationElement *el, const char *xpath) {
+    BSTR bname = NULL;
+    char *name = NULL;
+    if (SUCCEEDED(el->lpVtbl->get_CachedName(el, &bname)) && bname) {
+        name = w_to_utf8(bname);
+        SysFreeString(bname);
     }
+    BOOL enabled = FALSE;
+    el->lpVtbl->get_CachedIsEnabled(el, &enabled);
+
+    VARIANT v;
+    int isinvoke = 0, isscroll = 0;
+    VariantInit(&v);
+    if (SUCCEEDED(el->lpVtbl->GetCachedPropertyValue(el, UIA_IsInvokePatternAvailablePropertyId, &v)))
+        isinvoke = (V_VT(&v) == VT_BOOL && V_BOOL(&v) != 0);
+    VariantClear(&v);
+    VariantInit(&v);
+    if (SUCCEEDED(el->lpVtbl->GetCachedPropertyValue(el, UIA_IsScrollPatternAvailablePropertyId, &v)))
+        isscroll = (V_VT(&v) == VT_BOOL && V_BOOL(&v) != 0);
+    VariantClear(&v);
+
+    unsigned long long own_hwnd = cached_own_hwnd(el);
+
+    CONTROLTYPEID ct = 0;
+    el->lpVtbl->get_CachedControlType(el, &ct);
+    const char *tn = type_name(ct);
+    if (!tn) tn = "Custom";
+    RECT rect = {0};
+    el->lpVtbl->get_CachedBoundingRectangle(el, &rect);
+
+    emit_node(ctx, xpath, name, enabled ? 1 : 0, isinvoke, isscroll,
+              own_hwnd,
+              rect.left - u->left, rect.top - u->top,
+              rect.right - u->left, rect.bottom - u->top,
+              tn);
+    free(name);
 }
 
-/* 遍历单根：root_in_path=1（全局模式）时根段（顶层窗口）参与 path_match 首段
- * 匹配并支持 @Pid/子路径谓词；=0（单窗口模式）时 xpath 相对根向下，
- * 根自身不参与匹配（子级从 segs[0] 起） */
-static void walk_root(ListCtx *ctx, IUIAutomationTreeWalker *walker,
-                      IUIAutomationCacheRequest *cache, Uia *u,
-                      IUIAutomationElement *root, const char *root_type,
-                      int root_cnt, int root_in_path, unsigned long long root_hwnd,
-                      const char *root_xpath) {
-    ctx->depth = 0;
-    if (root_in_path) {
-        ctx->segs[0].el = root;
-        ctx->segs[0].cnt = root_cnt;
-        ctx->segs[0].top = 1;
-        ctx->segs[0].hwnd = root_hwnd;
-        ctx->depth = 1;
+/* 整树输出（无 xpath 查询或双斜杠星号）：每父一次 FindAllBuildCache(Children) 取全子级，
+ * 路径由递归携带（px 为 parent 的路径），无逐候选回溯 */
+static void dump_tree(StepCtx *s, IUIAutomationElement *parent, const char *px) {
+    Uia *u = s->u;
+    IUIAutomation *uia = u->uia;
+    IUIAutomationCondition *cond = NULL;
+    uia->lpVtbl->get_ControlViewCondition(uia, &cond);
+    IUIAutomationElementArray *arr = NULL;
+    parent->lpVtbl->FindAllBuildCache(parent, 2 /* Children */, cond, u->cache, &arr);
+    if (cond)
+        cond->lpVtbl->Release(cond);
+    if (!arr)
+        return;
+
+    int n = 0;
+    arr->lpVtbl->get_Length(arr, &n);
+    CONTROLTYPEID last_ct = 0;
+    int cnt = 0;
+    for (int i = 0; i < n; i++) {
+        IUIAutomationElement *el = NULL;
+        arr->lpVtbl->GetElement(arr, i, &el);
+        if (!el)
+            continue;
+        CONTROLTYPEID ct = 0;
+        el->lpVtbl->get_CachedControlType(el, &ct);
+        const char *tn = type_name(ct);
+        if (!tn) tn = "Custom";
+        cnt = (ct == last_ct) ? cnt + 1 : 1;
+        last_ct = ct;
+        char *own = path_append(px, tn, cnt);
+        emit_el(s->ctx, u, el, own);
+        dump_tree(s, el, own);
+        free(own);
+        el->lpVtbl->Release(el);
     }
-    if (!ctx->xp || (root_in_path && path_match(walker, ctx->segs, 1, ctx->xp))) {
-        BSTR bname = NULL;
-        char *name = NULL;
-        if (SUCCEEDED(root->lpVtbl->get_CachedName(root, &bname)) && bname) {
-            name = w_to_utf8(bname);
-            SysFreeString(bname);
-        }
-        BOOL enabled = FALSE;
-        root->lpVtbl->get_CachedIsEnabled(root, &enabled);
-        RECT rect = {0};
-        root->lpVtbl->get_CachedBoundingRectangle(root, &rect);
-        emit_node(ctx, root_xpath, name, enabled ? 1 : 0, 0, 0,
-                  root_hwnd,
-                  rect.left - u->left, rect.top - u->top,
-                  rect.right - u->left, rect.bottom - u->top,
-                  root_type);
-        free(name);
-    }
-    CONTROLTYPEID sub_last = 0;
-    int sub_count = 0;
-    walk_nodes(ctx, walker, cache, u, root, root_xpath, &sub_last, &sub_count);
+    arr->lpVtbl->Release(arr);
 }
 
 /* 计算深度限制：xpath 无 descendant 段时，匹配节点深度 = 段数；否则 0（不限） */
-static int xpath_max_depth(const XPath *xp) {
-    if (!xp)
-        return 0;
-    for (int i = 0; i < xp->n; i++)
-        if (xp->steps[i].descendant)
-            return 0;
-    return xp->n;
-}
 
 /* 子路径谓词位置检查：allow_first=1（全局模式）时仅第一段（顶层窗口段）允许 */
 static int check_subpath_placement(const XPath *xp, int allow_first,
@@ -977,6 +1021,123 @@ static int check_subpath_placement(const XPath *xp, int allow_first,
     return 1;
 }
 
+/* @Pid 位置检查：仅全局模式第一段（顶层窗口段）允许，其余显式报错 */
+static int check_pid_placement(const XPath *xp, int allow_first,
+                               char *err, size_t errlen) {
+    for (int i = 0; i < xp->n; i++) {
+        for (int j = 0; j < xp->steps[i].npreds; j++) {
+            if (xp->steps[i].preds[j].attr == XP_ATTR_PID && (!allow_first || i > 0)) {
+                snprintf(err, errlen, "@Pid 谓词仅支持顶层窗口段（list 全局模式第一段）");
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+/* ---------- 定位（严格唯一） ----------
+ * 与 list 同一求值核心（collect_cands）：穷举末段匹配（最多收 4 个用于诊断），
+ * 恰好 1 个 → 返回该元素；0 个 → 未找到；多个 → 歧义报错并列出候选路径 */
+
+typedef struct {
+    IUIAutomationElement *el; /* 引用持有 */
+    char *path;
+} Found;
+
+typedef struct { Found *v; int n, cap; } FoundList;
+
+static void found_push(FoundList *fl, IUIAutomationElement *el, char *path) {
+    if (fl->n >= fl->cap) {
+        fl->cap = fl->cap ? fl->cap * 2 : 4;
+        fl->v = realloc(fl->v, fl->cap * sizeof *fl->v);
+    }
+    el->lpVtbl->AddRef(el); /* 转移引用 */
+    fl->v[fl->n].el = el;
+    fl->v[fl->n].path = path;
+    fl->n++;
+}
+
+static void found_free(FoundList *fl) {
+    for (int i = 0; i < fl->n; i++) {
+        fl->v[i].el->lpVtbl->Release(fl->v[i].el);
+        free(fl->v[i].path);
+    }
+    free(fl->v);
+    memset(fl, 0, sizeof *fl);
+}
+
+/* 收集末段匹配（与 steps_walk 同求值），达 4 个候选即停（足够诊断） */
+static void find_walk(Uia *u, IUIAutomationElement *from, const XPath *xp,
+                      int si, const char *px, FoundList *out) {
+    const XStep *st = &xp->steps[si];
+    int last = (si == xp->n - 1);
+    CandList cl;
+    memset(&cl, 0, sizeof cl);
+    StepCtx s;
+    s.ctx = NULL;
+    s.u = u;
+    s.top_mode = 0;
+    collect_cands(&s, from, st, st->descendant, 0, NULL, &cl);
+    for (int i = 0; i < cl.n; i++) {
+        size_t n = strlen(px) + strlen(cl.v[i].path) + 1;
+        char *full = malloc(n);
+        snprintf(full, n, "%s%s", px, cl.v[i].path);
+        if (last) {
+            found_push(out, cl.v[i].el, full); /* full 所有权转移 */
+        } else {
+            find_walk(u, cl.v[i].el, xp, si + 1, full, out);
+            free(full);
+        }
+        if (out->n >= 4)
+            break;
+    }
+    cand_free(&cl);
+}
+
+void *uia_find(Uia *u, const char *xpath, char *err, size_t errlen) {
+    IUIAutomationElement *root = u->root;
+    if (!xpath || !xpath[0]) {
+        /* 根元素 */
+        root->lpVtbl->AddRef(root);
+        return root;
+    }
+    XPath xp;
+    if (!parse_xpath(xpath, &xp, err, errlen))
+        return NULL;
+    if (!check_subpath_placement(&xp, 0, err, errlen))
+        return NULL;
+    if (!check_pid_placement(&xp, 0, err, errlen))
+        return NULL;
+
+    FoundList fl;
+    memset(&fl, 0, sizeof fl);
+    find_walk(u, root, &xp, 0, "", &fl);
+    if (fl.n == 0) {
+        snprintf(err, errlen, "元素未找到: %s", xpath);
+        return NULL;
+    }
+    if (fl.n > 1) {
+        SB sb;
+        sb_init(&sb);
+        sb_adds(&sb, "匹配多个元素: ");
+        for (int i = 0; i < fl.n; i++) {
+            if (i)
+                sb_adds(&sb, "  ");
+            sb_adds(&sb, fl.v[i].path);
+        }
+        sb_adds(&sb, "（请用 [n] 或属性谓词收窄）");
+        snprintf(err, errlen, "%s", sb.buf);
+        sb_free(&sb);
+        found_free(&fl);
+        return NULL;
+    }
+    IUIAutomationElement *el = fl.v[0].el;
+    free(fl.v[0].path);
+    free(fl.v);
+    return el; /* 引用转移给调用方 */
+}
+
+
 int uia_list(Uia *u, const char *xpath, int json, char *err, size_t errlen, SB *out) {
     XPath xp;
     const XPath *xp_ptr = NULL;
@@ -984,6 +1145,8 @@ int uia_list(Uia *u, const char *xpath, int json, char *err, size_t errlen, SB *
         if (!parse_xpath(xpath, &xp, err, errlen))
             return 0;
         if (!check_subpath_placement(&xp, 0, err, errlen))
+            return 0;
+        if (!check_pid_placement(&xp, 0, err, errlen))
             return 0;
         xp_ptr = &xp;
     }
@@ -993,18 +1156,23 @@ int uia_list(Uia *u, const char *xpath, int json, char *err, size_t errlen, SB *
     ctx.out = out;
     ctx.json = json;
     ctx.first = 1;
-    ctx.xp = xp_ptr;
-    ctx.max_depth = xpath_max_depth(xp_ptr);
+    StepCtx s;
+    s.ctx = &ctx;
+    s.u = u;
+    s.top_mode = 0;
 
     /* 根元素：xpath 相对根向下，根自身不参与匹配（根行 xpath 为 /） */
     IUIAutomationElement *root = u->root;
-    CONTROLTYPEID rct = 0;
-    root->lpVtbl->get_CachedControlType(root, &rct);
-    const char *rtn = type_name(rct);
-    if (!rtn) rtn = "Custom";
-
-    walk_root(&ctx, u->walker, u->cache, u, root, rtn, 0, 0,
-              (unsigned long long)(ULONG_PTR)u->hwnd, "/");
+    if (!xp_ptr) {
+        /* 整树输出：根行 + 子树 */
+        emit_el(&ctx, u, root, "/");
+        dump_tree(&s, root, "");
+    } else if (is_full_dump(xp_ptr)) {
+        /* 全量通配（双斜杠星号）：根下全部（根自身不参与） */
+        dump_tree(&s, root, "");
+    } else {
+        steps_walk(&s, root, xp_ptr, 0, "", NULL);
+    }
 
     if (!json)
         list_emit_cols(&ctx, out);
@@ -1088,10 +1256,9 @@ static int is_excluded_proc(HWND hwnd) {
 
 /* 处理一个顶层窗口元素：可见性过滤（桌面路径）、默认排除进程、Win32 预筛、
  * 同类型计数、根段匹配检查，匹配则遍历子树 */
-static void process_root(ListCtx *ctx, IUIAutomationTreeWalker *walker,
-                         IUIAutomationCacheRequest *cache, Uia *u,
+static void process_root(ListCtx *ctx, Uia *u,
                          IUIAutomationElement *root, unsigned long long rhwnd,
-                         const XStep *first_st, int first_direct,
+                         const XPath *xp, const XStep *first_st, int first_direct,
                          CONTROLTYPEID *last_ct, int *count) {
     /* Win32 预筛：明确不匹配的窗口跳过 */
     if (first_direct && first_st->npreds > 0 &&
@@ -1111,18 +1278,40 @@ static void process_root(ListCtx *ctx, IUIAutomationTreeWalker *walker,
     *last_ct = rct;
     *count = cnt;
 
-    /* 根段匹配检查：非 descendant 首段不匹配则跳过整树遍历 */
-    if (first_direct) {
-        Seg root_seg = {root, cnt, 1, rhwnd};
-        if (!seg_matches(walker, &root_seg, first_st))
-            return;
-    }
-
     /* 顶层窗口段 xpath 不带 [n]（Z 序编号无意义，稳定标识用 hwnd 列） */
     char root_xpath[64];
     snprintf(root_xpath, sizeof root_xpath, "/%s", rtn);
 
-    walk_root(ctx, walker, cache, u, root, rtn, cnt, 1, rhwnd, root_xpath);
+    StepCtx s;
+    s.ctx = ctx;
+    s.u = u;
+    s.top_mode = 1;
+
+    if (!xp) {
+        /* 全量：窗口行 + 整树 */
+        emit_el(ctx, u, root, root_xpath);
+        dump_tree(&s, root, root_xpath);
+        return;
+    }
+    if (first_direct) {
+        /* 非 // 首段：根段（顶层窗口）严格匹配，其后从窗口子级起步进 */
+        Seg root_seg = {root, cnt, 1, rhwnd};
+        if (!seg_matches(u->walker, &root_seg, first_st))
+            return;
+        if (xp->n == 1)
+            emit_el(ctx, u, root, root_xpath);
+        else
+            steps_walk(&s, root, xp, 1, root_xpath, NULL);
+    } else {
+        /* // 首段：顶层窗口自身参与（descendant-or-self 的 self），全量通配特判走整树 */
+        if (is_full_dump(xp)) {
+            emit_el(ctx, u, root, root_xpath);
+            dump_tree(&s, root, root_xpath);
+        } else {
+            Seg root_seg = {root, cnt, 1, rhwnd};
+            steps_walk(&s, root, xp, 0, root_xpath, &root_seg);
+        }
+    }
 }
 
 /* list 全局模式：虚拟根 = 所有顶层窗口（默认仅可见）。
@@ -1136,6 +1325,8 @@ int uia_list_all(int all, const char *xpath, int json, char *err, size_t errlen,
         if (!parse_xpath(xpath, &xp, err, errlen))
             return 0;
         if (!check_subpath_placement(&xp, 1, err, errlen))
+            return 0;
+        if (!check_pid_placement(&xp, 1, err, errlen))
             return 0;
         xp_ptr = &xp;
     }
@@ -1182,11 +1373,12 @@ int uia_list_all(int all, const char *xpath, int json, char *err, size_t errlen,
     ctx.out = out;
     ctx.json = json;
     ctx.first = 1;
-    ctx.xp = xp_ptr;
-    ctx.max_depth = xpath_max_depth(xp_ptr);
 
     Uia u;
     memset(&u, 0, sizeof u);
+    u.uia = uia;
+    u.cache = cache;
+    u.walker = walker;
 
     /* 顶层窗口同类型计数（与子树内 [n] 语义一致） */
     CONTROLTYPEID last_ct = 0;
@@ -1220,8 +1412,8 @@ int uia_list_all(int all, const char *xpath, int json, char *err, size_t errlen,
                         root->lpVtbl->Release(root);
                         continue;
                     }
-                    process_root(&ctx, walker, cache, &u, root, rhwnd,
-                                 first_st, first_direct, &last_ct, &count);
+                    process_root(&ctx, &u, root, rhwnd,
+                                 xp_ptr, first_st, first_direct, &last_ct, &count);
                     root->lpVtbl->Release(root);
                 }
                 arr->lpVtbl->Release(arr);
@@ -1239,8 +1431,8 @@ int uia_list_all(int all, const char *xpath, int json, char *err, size_t errlen,
             IUIAutomationElement *root = NULL;
             if (FAILED(uia->lpVtbl->ElementFromHandleBuildCache(uia, hwnd, cache, &root)) || !root)
                 continue;
-            process_root(&ctx, walker, cache, &u, root, hwnds[i],
-                         first_st, first_direct, &last_ct, &count);
+            process_root(&ctx, &u, root, hwnds[i],
+                         xp_ptr, first_st, first_direct, &last_ct, &count);
             root->lpVtbl->Release(root);
         }
     }

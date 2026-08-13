@@ -27,10 +27,10 @@ winctl --help
 |---|---|
 | `list [--all]` | Element query (set semantics). No locator = top-level windows (default `/Window`, fast). Full tree via `//*`. Locator starting with `/` = global query (virtual root). `hwnd` prefix = single window; no xpath = whole tree. Large-tree processes (firefox.exe etc.) excluded by default; `--all` includes them |
 | `prop <locator> [key] [value]` | Read/write properties: no value reads, value writes; no key dumps all (key: value lines) |
-| `click <locator> [--mouse] [--button B] [--action A]` | Click element (first match) |
-| `focus <locator>` | Set focus (first match) |
+| `click <locator> [--mouse] [--button B] [--action A]` | Click element (exactly one match required) |
+| `focus <locator>` | Set focus (exactly one match required) |
 
-`prop`/`click`/`focus` locate the first match; `list` is the only set-semantics command.
+`prop`/`click`/`focus` require exactly one match (ambiguity is an error listing candidates); `list` is the only set-semantics command.
 
 ## Locator
 
@@ -75,7 +75,7 @@ winctl prop 0x1a2b pid                      # read process ID
 winctl click 0x1a2b/Pane/Button      # click
 ```
 
-Top-level window positioning supports attribute predicates only (`[@Name]`/`[@Pid]`/`[@Class]`); positional `[n]` on top-level windows is rejected (Z-order unstable). In-tree `[n]` is sibling order and stable.
+Top-level window positioning supports attribute predicates only (`[@Name]`/`[@Pid]`/`[@Class]`); positional `[n]` on top-level windows is rejected (Z-order unstable). In-tree `[n]` counts matched siblings (after predicate filtering) and is stable.
 
 ## Output and Exit Codes
 

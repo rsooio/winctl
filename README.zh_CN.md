@@ -27,10 +27,10 @@ winctl --help
 |---|---|
 | `list [--all]` | 元素查询（集合语义）：无 locator = 顶层窗口（默认 `/Window`，快）；全量输出用 `//*`；locator 以 `/` 开头 = 全局查询（虚拟根）；hwnd 前缀 = 单窗口，无 xpath = 整树。默认排除大树进程（firefox.exe 等），`--all` 包含 |
 | `prop <locator> [key] [value]` | 读写属性：无 value 参读、有 value 参写；key 缺省读全部（kv 行式） |
-| `click <locator> [--mouse] [--button B] [--action A]` | 点击元素（取第一个匹配） |
-| `focus <locator>` | 聚焦元素（取第一个匹配） |
+| `click <locator> [--mouse] [--button B] [--action A]` | 点击元素（严格唯一：恰好一个匹配） |
+| `focus <locator>` | 聚焦元素（严格唯一：恰好一个匹配） |
 
-`prop`/`click`/`focus` 的 locator 取第一个匹配；`list` 是唯一集合语义命令。
+`prop`/`click`/`focus` 的 locator 必须恰好匹配一个元素（多个报歧义并列出候选）；`list` 是唯一集合语义命令。
 
 ### locator
 
@@ -70,7 +70,7 @@ winctl prop 0x1a2b pid                       # 读进程 ID
 winctl click 0x1a2b/Pane/Button       # 点击
 ```
 
-顶层窗口定位仅支持属性谓词（`[@Name]`/`[@Pid]`/`[@Class]`），不支持位置谓词 `[n]`（顶层窗口序号依 Z 序变化，不稳定）；树内 `[n]` 为兄弟序，结构稳定可用。
+顶层窗口定位仅支持属性谓词（`[@Name]`/`[@Pid]`/`[@Class]`），不支持位置谓词 `[n]`（顶层窗口序号依 Z 序变化，不稳定）；树内 `[n]` 为同辈匹配序（谓词过滤后计数），结构稳定可用。
 
 ### 输出与退出码
 

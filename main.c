@@ -120,7 +120,7 @@ static int parse_locator(const char *loc, char *hwnd_buf, size_t cap,
     return 1;
 }
 
-/* UIA 初始化 + 定位（取第一个匹配），成功返回 0 */
+/* UIA 初始化 + 定位（严格唯一），成功返回 0 */
 static int uia_locate(const char *loc, Uia *u, void **el_out, const char **xp_out) {
     char hwnd_buf[32];
     const char *xp;
@@ -131,12 +131,11 @@ static int uia_locate(const char *loc, Uia *u, void **el_out, const char **xp_ou
         snprintf(msg, sizeof msg, "窗口句柄无效: 0x%s", hwnd_buf);
         return fail(2, msg);
     }
-    void *el = uia_find(u, xp);
+    char err[512];
+    void *el = uia_find(u, xp, err, sizeof err);
     if (!el) {
         uia_free(u);
-        char msg[160];
-        snprintf(msg, sizeof msg, "元素未找到: %s", xp ? xp : "(root)");
-        return fail(3, msg);
+        return fail(3, err);
     }
     *el_out = el;
     *xp_out = xp;
@@ -338,12 +337,12 @@ static void usage(void) {
     puts("        读写属性：无 value 参读，有 value 参写；key 缺省读全部（kv 行式）");
     puts("");
     puts("    click <locator> [--mouse] [--button B] [--action A]");
-    puts("        点击元素（取第一个匹配）");
+    puts("        点击元素（严格唯一：恰好一个匹配）");
     puts("");
     puts("    focus <locator>");
-    puts("        聚焦元素（取第一个匹配）");
+    puts("        聚焦元素（严格唯一：恰好一个匹配）");
     puts("");
-    puts("    prop/click/focus 的 locator 取第一个匹配；list 是唯一集合语义命令");
+    puts("    prop/click/focus 的 locator 必须恰好匹配一个元素（多个报歧义并列出候选）；list 是唯一集合语义命令");
     puts("");
     puts("LOCATOR");
     puts("    <hwnd>            根元素自身（16 进制，0x 前缀可选）；可为任意窗口/元素句柄，");
@@ -382,7 +381,7 @@ static void usage(void) {
     puts("    winctl click 0x1a2b/Pane/Button      点击");
     puts("");
     puts("    顶层窗口定位仅支持属性谓词（[@Name]/[@Pid]/[@Class]），不支持位置谓词 [n]");
-    puts("    （顶层窗口序号依 Z 序变化，不稳定）；树内 [n] 为兄弟序，结构稳定可用");
+    puts("    （顶层窗口序号依 Z 序变化，不稳定）；树内 [n] 为同辈匹配序（谓词过滤后计数），结构稳定可用");
     puts("    全局查询 @Name/@Class/@Pid 谓词走 Win32 预筛（毫秒级）；");
     puts("    [n] 位置谓词与 // 后代查询需全量遍历（秒级）");
     puts("");
